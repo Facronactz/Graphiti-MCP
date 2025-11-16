@@ -952,7 +952,17 @@ def main():
     """Main function to run the Graphiti MCP server."""
     try:
         # Run everything in a single event loop
-        asyncio.run(run_mcp_server())
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            logger.info('Event loop is already running. Scheduling server startup.')
+            loop.create_task(run_mcp_server())
+        else:
+            logger.info('No running event loop. Starting new one.')
+            asyncio.run(run_mcp_server())
     except KeyboardInterrupt:
         logger.info('Server shutting down...')
     except Exception as e:
