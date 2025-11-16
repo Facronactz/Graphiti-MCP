@@ -17,7 +17,7 @@ from graphiti_core.edges import EntityEdge
 from graphiti_core.nodes import EpisodeType, EpisodicNode
 from graphiti_core.search.search_filters import SearchFilters
 from graphiti_core.utils.maintenance.graph_data_operations import clear_data
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
 from pydantic import BaseModel
 from starlette.responses import JSONResponse
 
@@ -761,98 +761,13 @@ async def health_check(request) -> JSONResponse:
 async def create_server() -> FastMCP:
     """
     Factory function to initialize and return the configured Graphiti MCP server.
-    This is the intended entrypoint for ASGI servers like Uvicorn.
+    This is the intended entrypoint for ASGI servers and the `fastmcp` CLI runner.
     """
     global config, graphiti_service, queue_service, graphiti_client, semaphore
 
-    parser = argparse.ArgumentParser(
-        description='Run the Graphiti MCP server with YAML configuration support'
-    )
-
-    # Configuration file argument
-    # Default to config/config.yaml relative to the mcp_server directory
-    default_config = Path(__file__).parent.parent / 'config' / 'config.yaml'
-    parser.add_argument(
-        '--config',
-        type=Path,
-        default=default_config,
-        help='Path to YAML configuration file (default: config/config.yaml)',
-    )
-
-    # Transport arguments
-    parser.add_argument(
-        '--transport',
-        choices=['sse', 'stdio', 'http'],
-        help='Transport to use: http (recommended, default), stdio (standard I/O), or sse (deprecated)',
-    )
-    parser.add_argument(
-        '--host',
-        help='Host to bind the MCP server to',
-    )
-    parser.add_argument(
-        '--port',
-        type=int,
-        help='Port to bind the MCP server to',
-    )
-
-    # Provider selection arguments
-    parser.add_argument(
-        '--llm-provider',
-        choices=['openai', 'azure_openai', 'anthropic', 'gemini', 'groq', 'chutes'],
-        help='LLM provider to use',
-    )
-    parser.add_argument(
-        '--embedder-provider',
-        choices=['openai', 'azure_openai', 'gemini', 'voyage', 'chutes'],
-        help='Embedder provider to use',
-    )
-    parser.add_argument(
-        '--database-provider',
-        choices=['neo4j', 'falkordb'],
-        help='Database provider to use',
-    )
-
-    # LLM configuration arguments
-    parser.add_argument('--model', help='Model name to use with the LLM client')
-    parser.add_argument('--small-model', help='Small model name to use with the LLM client')
-    parser.add_argument(
-        '--temperature', type=float, help='Temperature setting for the LLM (0.0-2.0)'
-    )
-
-    # Embedder configuration arguments
-    parser.add_argument('--embedder-model', help='Model name to use with the embedder')
-
-    # Graphiti-specific arguments
-    parser.add_argument(
-        '--group-id',
-        help='Namespace for the graph. If not provided, uses config file or generates random UUID.',
-    )
-    parser.add_argument(
-        '--user-id',
-        help='User ID for tracking operations',
-    )
-    parser.add_argument(
-        '--destroy-graph',
-        action='store_true',
-        help='Destroy all Graphiti graphs on startup',
-    )
-
-    # Use parse_known_args to ignore unknown arguments that may be passed by the server environment
-    args, _ = parser.parse_known_args()
-
-    # Set config path in environment for the settings to pick up
-    if args.config:
-        os.environ['CONFIG_PATH'] = str(args.config)
-
-    # Load configuration with environment variables and YAML
+    # Load configuration from YAML and environment variables.
+    # CLI overrides are handled by the `fastmcp` runner.
     config = GraphitiConfig()
-
-    # Apply CLI overrides
-    config.apply_cli_overrides(args)
-
-    # Also apply legacy CLI args for backward compatibility
-    if hasattr(args, 'destroy_graph'):
-        config.destroy_graph = args.destroy_graph
 
     # Log configuration details
     logger.info('Using configuration:')
@@ -860,7 +775,6 @@ async def create_server() -> FastMCP:
     logger.info(f'  - Embedder: {config.embedder.provider} / {config.embedder.model}')
     logger.info(f'  - Database: {config.database.provider}')
     logger.info(f'  - Group ID: {config.graphiti.group_id}')
-    logger.info(f'  - Transport: {config.server.transport}')
 
     # Log graphiti-core version
     try:
@@ -898,71 +812,8 @@ async def create_server() -> FastMCP:
     # Initialize queue service with the client
     await queue_service.initialize(graphiti_client)
 
-    # Set MCP server settings
-    if config.server.host:
-        mcp.settings.host = config.server.host
-    if config.server.port:
-        mcp.settings.port = config.server.port
+    # The `fastmcp` runner will handle setting the host and port on the server instance
+    # based on CLI arguments, so we don't need to do it here.
 
     # Return the configured MCP server instance
     return mcp
-
-
-def main():
-    """Main function to run the Graphiti MCP server for local execution."""
-
-    async def main_async():
-        # When running locally, we use the factory to set up the server
-        server = await create_server()
-        mcp_config = config.server  # Config is now globally available
-
-        # Run the server with configured transport
-        logger.info(f'Starting MCP server with transport: {mcp_config.transport}')
-        if mcp_config.transport == 'stdio':
-            await server.run_stdio_async()
-        elif mcp_config.transport == 'sse':
-            logger.info(
-                f'Running MCP server with SSE transport on {server.settings.host}:{server.settings.port}'
-            )
-            logger.info(f'Access the server at: http://{server.settings.host}:{server.settings.port}/sse')
-            await server.run_sse_async()
-        elif mcp_config.transport == 'http':
-            # Use localhost for display if binding to 0.0.0.0
-            display_host = 'localhost' if server.settings.host == '0.0.0.0' else server.settings.host
-            logger.info(
-                f'Running MCP server with streamable HTTP transport on {server.settings.host}:{server.settings.port}'
-            )
-            logger.info('=' * 60)
-            logger.info('MCP Server Access Information:')
-            logger.info(f'  Base URL: http://{display_host}:{server.settings.port}/')
-            logger.info(f'  MCP Endpoint: http://{display_host}:{server.settings.port}/mcp/')
-            logger.info('  Transport: HTTP (streamable)')
-
-            # Show FalkorDB Browser UI access if enabled
-            if os.environ.get('BROWSER', '1') == '1':
-                logger.info(f'  FalkorDB Browser UI: http://{display_host}:3000/')
-
-            logger.info('=' * 60)
-            logger.info('For MCP clients, connect to the /mcp/ endpoint above')
-
-            # Configure uvicorn logging to match our format
-            configure_uvicorn_logging()
-
-            await server.run_streamable_http_async()
-        else:
-            raise ValueError(
-                f'Unsupported transport: {mcp_config.transport}. Use "sse", "stdio", or "http"'
-            )
-
-    try:
-        # Run everything in a single event loop for local execution
-        asyncio.run(main_async())
-    except KeyboardInterrupt:
-        logger.info('Server shutting down...')
-    except Exception as e:
-        logger.error(f'Error initializing Graphiti MCP server: {str(e)}')
-        raise
-
-
-if __name__ == '__main__':
-    main()
